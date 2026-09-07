@@ -1,7 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import * as SpeechSDK from "microsoft-cognitiveservices-speech-sdk";
+import { useHesitationFSM } from "@/hooks/use-hesitation-fsm";
+import { alignWords, AlignedItem } from "@/lib/aligner";
+import { createSession } from '@/lib/api';
 
 // ----------------------------------------------------------------------
 // TYPES
@@ -34,6 +37,7 @@ type DecisionRecord = {
 };
 
 type ReadingLevel = "beginner" | "intermediate" | "advanced";
+type ReadingMode = "slow" | "fast";
 
 interface StudentProfile {
   id: string;
@@ -57,8 +61,16 @@ interface CorrectionStrategy {
   checkAllShortTexts: boolean;
 }
 
+interface AzureWordResult {
+  Word: string;
+  PronunciationAssessment?: {
+    AccuracyScore?: number;
+    ErrorType?: string;
+  };
+}
+
 // ----------------------------------------------------------------------
-// CONFIG
+// CONFIG & HELPERS
 // ----------------------------------------------------------------------
 
 const TEST_STUDENT: StudentProfile = {
@@ -77,12 +89,7 @@ const TEST_STUDENT: StudentProfile = {
 
 const REFERENCE_TEXT = "The cat sat on the mat.";
 const REFERENCE_WORDS = REFERENCE_TEXT.replace(/[.,!?]/g, "").split(" ");
-
 const CHECK_INTERVAL_MS = 200;
-
-function normalise(word: string) {
-  return word.toLowerCase().replace(/[.,!?]/g, "").trim();
-}
 
 function phonicsHint(word: string) {
   return word.length > 0 ? `${word[0]}...` : "";
@@ -95,44 +102,16 @@ function initialWords(): WordState[] {
   }));
 }
 
-// ----------------------------------------------------------------------
-// СТРАТЕГІЇ КОРЕКЦІЇ (оновлені пороги)
-// ----------------------------------------------------------------------
-
 const getCorrectionStrategy = (level: ReadingLevel): CorrectionStrategy => {
   switch (level) {
     case "beginner":
-      return {
-        checkRate: 1.0,
-        promptDelayMs: 2500,
-        modelDelayMs: 2500,
-        minAccuracy: 40,
-        checkAllShortTexts: true,
-      };
+      return { checkRate: 1.0, promptDelayMs: 4000, modelDelayMs: 3000, minAccuracy: 30, checkAllShortTexts: true };
     case "intermediate":
-      return {
-        checkRate: 0.7,
-        promptDelayMs: 2500,
-        modelDelayMs: 2500,
-        minAccuracy: 45,
-        checkAllShortTexts: true,
-      };
+      return { checkRate: 0.7, promptDelayMs: 4000, modelDelayMs: 3000, minAccuracy: 30, checkAllShortTexts: true };
     case "advanced":
-      return {
-        checkRate: 0.5,
-        promptDelayMs: 2000,
-        modelDelayMs: 2000,
-        minAccuracy: 50,
-        checkAllShortTexts: false,
-      };
+      return { checkRate: 0.5, promptDelayMs: 3000, modelDelayMs: 2500, minAccuracy: 30, checkAllShortTexts: false };
     default:
-      return {
-        checkRate: 0.7,
-        promptDelayMs: 2500,
-        modelDelayMs: 2500,
-        minAccuracy: 45,
-        checkAllShortTexts: true,
-      };
+      return { checkRate: 0.7, promptDelayMs: 4000, modelDelayMs: 3000, minAccuracy: 30, checkAllShortTexts: true };
   }
 };
 
@@ -152,6 +131,24 @@ export default function Home() {
   const voicesRef = useRef<SpeechSynthesisVoice[]>([]);
   const processingLockRef = useRef(false);
   const errorWordsRef = useRef<string[]>([]);
+  const strategyRef = useRef<CorrectionStrategy | null>(null);
+  const startTimeRef = useRef(Date.now());
+  const isInitializedRef = useRef(false);
+  const lastSpokenWordRef = useRef<string>("");
+  const isStoppingRef = useRef(false);
+
+  // ===== НОВИЙ СТАН ДЛЯ РЕЖИМУ =====
+  const [readingMode, setReadingMode] = useState<ReadingMode>("slow");
+
+  const {
+    speechStartedEpoch,
+    start: startVAD,
+    finish: finishVAD,
+    isActive: vadIsActive,
+    errorMessage: vadError,
+    // Додаємо метод для отримання аудіо-блоба
+    getAudioBlob,
+  } = useHesitationFSM();
 
   const [student, setStudent] = useState<StudentProfile | null>(null);
   const [strategy, setStrategy] = useState<CorrectionStrategy | null>(null);
@@ -162,107 +159,33 @@ export default function Home() {
   const [words, setWords] = useState<WordState[]>(wordsRef.current);
   const [decisionTrace, setDecisionTrace] = useState<DecisionRecord[]>([]);
   const [liveHint, setLiveHint] = useState("");
-  const [showTeacherView, setShowTeacherView] = useState(false);
+  const [showTeacherView, setShowTeacherView] = useState(true);
   const [showErrorSummary, setShowErrorSummary] = useState(false);
-
-  // --------------------------------------------------------------------
-  // ЗАВАНТАЖЕННЯ СТУДЕНТА
-  // --------------------------------------------------------------------
+  const [currentSpokenWord, setCurrentSpokenWord] = useState("");
 
   useEffect(() => {
-    const loadStudent = async () => {
-      try {
-        const params = new URLSearchParams(window.location.search);
-        const studentId = params.get("student");
+    strategyRef.current = strategy;
+  }, [strategy]);
 
-        if (studentId) {
-          const levelParam = params.get("level") as ReadingLevel | null;
-          const studentData = {
-            ...TEST_STUDENT,
-            id: studentId,
-            readingLevel: levelParam || TEST_STUDENT.readingLevel,
-          };
-          setStudent(studentData);
-          setStrategy(getCorrectionStrategy(studentData.readingLevel));
-        } else {
-          setStudent(TEST_STUDENT);
-          setStrategy(getCorrectionStrategy(TEST_STUDENT.readingLevel));
-        }
-      } catch (err) {
-        console.error("Failed to load student:", err);
-        setStudent(TEST_STUDENT);
-        setStrategy(getCorrectionStrategy(TEST_STUDENT.readingLevel));
-      } finally {
-        setStudentLoading(false);
-      }
-    };
-
-    loadStudent();
-  }, []);
-
-  // --------------------------------------------------------------------
-  // ГОЛОСОВІ РУШІЇ
-  // --------------------------------------------------------------------
-
-  useEffect(() => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-
-    const loadVoices = () => {
-      voicesRef.current = window.speechSynthesis.getVoices();
-    };
-
-    loadVoices();
-    window.speechSynthesis.onvoiceschanged = loadVoices;
-  }, []);
-
-  const speakWord = (word: string) => {
-    try {
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(word);
-      const voices = voicesRef.current;
-
-      const preferred =
-        voices.find((v) => v.lang === "en-GB") ||
-        voices.find((v) => v.lang === "en-IE") ||
-        voices.find((v) => v.lang.startsWith("en"));
-
-      if (preferred) {
-        utterance.voice = preferred;
-        utterance.lang = preferred.lang;
-      } else {
-        utterance.lang = "en-GB";
-      }
-
-      utterance.rate = 0.85;
-      window.speechSynthesis.speak(utterance);
-    } catch {
-      // speechSynthesis not available
-    }
-  };
-
-  // --------------------------------------------------------------------
-  // ДОПОМІЖНІ ФУНКЦІЇ
-  // --------------------------------------------------------------------
-
-  const commitWords = (next: WordState[]) => {
+  const commitWords = useCallback((next: WordState[]) => {
     wordsRef.current = next;
-    setWords(next);
-  };
+    setWords([...next]);
+  }, []);
 
-  const logDecision = (record: Omit<DecisionRecord, "timestamp">) => {
-    setDecisionTrace((prev) => [...prev, { ...record, timestamp: Date.now() }]);
-  };
-
-  const touchActivity = () => {
+  const touchActivity = useCallback(() => {
     lastActivityRef.current = Date.now();
-    if (promptedAtRef.current !== null) {
+    if (promptedAtRef.current !== null && Date.now() - promptedAtRef.current > 500) {
       promptedAtRef.current = null;
     }
-  };
+  }, []);
 
-  const advanceTo = (index: number) => {
-    if (index <= currentIndexRef.current) return;
-    
+  const logDecision = useCallback((record: Omit<DecisionRecord, "timestamp">) => {
+    setDecisionTrace((prev) => [...prev, { ...record, timestamp: Date.now() }]);
+  }, []);
+
+  const advanceTo = useCallback((index: number) => {
+    if (index < 0 || index > REFERENCE_WORDS.length) return;
+
     currentIndexRef.current = index;
     promptedAtRef.current = null;
     modelledForIndexRef.current = null;
@@ -276,229 +199,209 @@ export default function Home() {
 
     commitWords(next);
     setLiveHint("");
-  };
+    setCurrentSpokenWord("");
+  }, [commitWords, touchActivity]);
 
-  const markWordStatus = (index: number, status: WordStatus, accuracy?: number) => {
+  const markWordStatus = useCallback((index: number, status: WordStatus, accuracy?: number) => {
     if (status === "error" || status === "modelled") {
       const word = REFERENCE_WORDS[index];
-      if (!errorWordsRef.current.includes(word)) {
+      if (word && !errorWordsRef.current.includes(word)) {
         errorWordsRef.current.push(word);
       }
     }
-    
-    commitWords(
-      wordsRef.current.map((w, i) => (i === index ? { ...w, status, accuracy } : w))
-    );
-  };
 
-  // --------------------------------------------------------------------
-  // АДАПТИВНА ЛОГІКА
-  // --------------------------------------------------------------------
+    const updated = wordsRef.current.map((w, i) => (i === index ? { ...w, status, accuracy } : w));
+    commitWords(updated);
+  }, [commitWords]);
 
-  const shouldCheckWord = (
-    wordIndex: number,
-    totalWords: number,
-    strat: CorrectionStrategy,
-    avgAccuracy: number,
-    wordsRead: number
-  ): boolean => {
-    if (totalWords <= 10 && strat.checkAllShortTexts) {
-      return true;
-    }
-
-    if (avgAccuracy < strat.minAccuracy && wordsRead > 3) {
-      return true;
-    }
-
-    if (wordIndex === 0) return true;
-
-    const seed = wordIndex * 7 + 13;
-    const random = ((seed * 9301 + 49297) % 233280) / 233280;
-    return random < strat.checkRate;
-  };
-
-  // --------------------------------------------------------------------
-  // ОБРОБКА РОЗПІЗНАНИХ СЛІВ (оновлена)
-  // --------------------------------------------------------------------
-
-  const processRecognizedWords = (
-    azureWords: { Word: string; AccuracyScore: number }[],
-    isInterim: boolean = false
-  ) => {
-    if (processingLockRef.current) return;
-    if (!strategy) return;
-    if (currentIndexRef.current >= REFERENCE_WORDS.length) return;
-
-    processingLockRef.current = true;
-
+  const speakWord = useCallback((word: string) => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
     try {
-      const currentIdx = currentIndexRef.current;
-      const expected = normalise(REFERENCE_WORDS[currentIdx]);
-      
-      const firstWord = azureWords[0];
-      if (!firstWord) {
-        processingLockRef.current = false;
-        return;
-      }
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(word);
+      const voices = voicesRef.current;
 
-      const heard = normalise(firstWord.Word);
-      const accuracy = firstWord.AccuracyScore ?? 0;
+      const preferred =
+        voices.find((v) => v.lang === "en-IE") ||
+        voices.find((v) => v.lang === "en-GB") ||
+        voices.find((v) => v.lang.startsWith("en"));
 
-      if (isInterim) {
-        touchActivity();
-        processingLockRef.current = false;
-        return;
-      }
-
-      touchActivity();
-
-      const currentStatus = wordsRef.current[currentIdx]?.status;
-      if (currentStatus === "correct" || 
-          currentStatus === "self-corrected" || 
-          currentStatus === "modelled" ||
-          currentStatus === "error") {
-        advanceTo(currentIdx + 1);
-        processingLockRef.current = false;
-        return;
-      }
-
-      const totalWordsRead = wordsRef.current.filter(
-        (w) => w.status === "correct" || w.status === "self-corrected"
-      ).length;
-
-      const accuracySum = wordsRef.current
-        .filter((w) => w.accuracy !== undefined)
-        .reduce((sum, w) => sum + (w.accuracy || 0), 0);
-
-      const avgAccuracy = accuracySum / (totalWordsRead || 1);
-      const totalWords = REFERENCE_WORDS.length;
-
-      const shouldCheck = shouldCheckWord(
-        currentIdx,
-        totalWords,
-        strategy,
-        avgAccuracy,
-        totalWordsRead
-      );
-
-      if (!shouldCheck) {
-        markWordStatus(currentIdx, "skipped", accuracy);
-        logDecision({
-          word: REFERENCE_WORDS[currentIdx],
-          action: "SKIPPED",
-          reason: `adaptive skip (checkRate: ${strategy.checkRate})`,
-          accuracy,
-        });
-        advanceTo(currentIdx + 1);
-        processingLockRef.current = false;
-        return;
-      }
-
-      const wasPrompted = promptedAtRef.current !== null;
-      const wordsMatch = heard === expected;
-
-      // 🔥 НОВА ЛОГІКА: приймаємо, якщо слова збігаються і точність > 30
-      if (wordsMatch && accuracy >= 30) {
-        if (wasPrompted) {
-          markWordStatus(currentIdx, "self-corrected", accuracy);
-          logDecision({
-            word: REFERENCE_WORDS[currentIdx],
-            action: "STAY_SILENT",
-            reason: "self-corrected after prompt",
-            accuracy,
-          });
-        } else {
-          markWordStatus(currentIdx, "correct", accuracy);
-          logDecision({
-            word: REFERENCE_WORDS[currentIdx],
-            action: "STAY_SILENT",
-            reason: "accepted reading",
-            accuracy,
-          });
-        }
-        promptedAtRef.current = null;
-        advanceTo(currentIdx + 1);
-      } else if (wordsMatch && accuracy < 30) {
-        // Дуже низька точність — чекаємо
-        logDecision({
-          word: REFERENCE_WORDS[currentIdx],
-          action: "WAIT",
-          reason: `very low confidence (${accuracy.toFixed(0)})`,
-          accuracy,
-        });
+      if (preferred) {
+        utterance.voice = preferred;
+        utterance.lang = preferred.lang;
       } else {
-        // Слова не збігаються — помилка
-        markWordStatus(currentIdx, "error", accuracy);
-        logDecision({
-          word: REFERENCE_WORDS[currentIdx],
-          action: "ERROR",
-          reason: `heard "${firstWord.Word}" instead of "${REFERENCE_WORDS[currentIdx]}"`,
-          accuracy,
-        });
-        promptedAtRef.current = null;
-        advanceTo(currentIdx + 1);
+        utterance.lang = "en-IE";
       }
 
-    } catch (err) {
-      console.error("Process error:", err);
-    } finally {
-      setTimeout(() => {
-        processingLockRef.current = false;
-      }, 100);
+      utterance.rate = 0.85;
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      // Audio fallback
     }
-  };
-
-  // --------------------------------------------------------------------
-  // ТАЙМЕР
-  // --------------------------------------------------------------------
+  }, []);
 
   useEffect(() => {
-    if (!isRecording || !strategy) {
+    if (speechStartedEpoch > 0 && currentIndexRef.current < REFERENCE_WORDS.length) {
+      touchActivity();
+    }
+  }, [speechStartedEpoch, touchActivity]);
+
+  useEffect(() => {
+    const loadStudent = async () => {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const studentId = params.get("student");
+
+        const targetStudent = studentId
+          ? {
+              ...TEST_STUDENT,
+              id: studentId,
+              readingLevel: (params.get("level") as ReadingLevel) || TEST_STUDENT.readingLevel,
+            }
+          : TEST_STUDENT;
+
+        const strat = getCorrectionStrategy(targetStudent.readingLevel);
+        setStudent(targetStudent);
+        setStrategy(strat);
+        strategyRef.current = strat;
+      } catch (err) {
+        console.error("Failed to load student profile:", err);
+        setStudent(TEST_STUDENT);
+        const strat = getCorrectionStrategy(TEST_STUDENT.readingLevel);
+        setStrategy(strat);
+        strategyRef.current = strat;
+      } finally {
+        setStudentLoading(false);
+      }
+    };
+
+    loadStudent();
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+
+    const loadVoices = () => {
+      voicesRef.current = window.speechSynthesis.getVoices();
+    };
+
+    loadVoices();
+    window.speechSynthesis.onvoiceschanged = loadVoices;
+  }, []);
+
+  // ===== ФУНКЦІЯ ЗУПИНКИ ЗАПИСУ =====
+  const performStop = useCallback(() => {
+    if (isStoppingRef.current) return;
+    isStoppingRef.current = true;
+
+    const recognizer = recognizerRef.current;
+    if (!recognizer) {
+      isStoppingRef.current = false;
+      return;
+    }
+
+    finishVAD();
+
+    recognizer.stopContinuousRecognitionAsync(
+      () => {
+        recognizer.close();
+        recognizerRef.current = null;
+        setIsRecording(false);
+        if (errorWordsRef.current.length > 0) {
+          setShowErrorSummary(true);
+        }
+        isStoppingRef.current = false;
+        saveSessionToApi();
+      },
+      () => {
+        recognizer.close();
+        recognizerRef.current = null;
+        setIsRecording(false);
+        if (errorWordsRef.current.length > 0) {
+          setShowErrorSummary(true);
+        }
+        isStoppingRef.current = false;
+        saveSessionToApi();
+      }
+    );
+  }, [finishVAD]);
+
+  // ===== АВТОМАТИЧНЕ ЗАВЕРШЕННЯ =====
+  useEffect(() => {
+    const idx = currentIndexRef.current;
+    if (idx >= REFERENCE_WORDS.length && isRecording && !isStoppingRef.current) {
+      console.log('🎯 All words read, stopping automatically...');
+      performStop();
+    }
+  }, [currentIndexRef.current, isRecording, performStop]);
+
+  // Таймер підказок (тільки для повільного режиму)
+  useEffect(() => {
+    if (!isRecording) {
       if (timerRef.current) clearInterval(timerRef.current);
       return;
     }
 
+    // Якщо швидкий режим - не використовуємо таймер підказок
+    if (readingMode === "fast") {
+      if (timerRef.current) clearInterval(timerRef.current);
+      return;
+    }
+
+    isInitializedRef.current = false;
+    
+    const initializationTimer = setTimeout(() => {
+      isInitializedRef.current = true;
+    }, 2000);
+
     timerRef.current = setInterval(() => {
+      const currentStrategy = strategyRef.current;
+      if (!currentStrategy) return;
+
       const idx = currentIndexRef.current;
       if (idx >= REFERENCE_WORDS.length) return;
 
       const currentWordStatus = wordsRef.current[idx]?.status;
-      if (currentWordStatus === "correct" || 
-          currentWordStatus === "self-corrected" || 
-          currentWordStatus === "modelled" ||
-          currentWordStatus === "skipped" ||
-          currentWordStatus === "error") {
+      
+      if (
+        currentWordStatus === "correct" ||
+        currentWordStatus === "self-corrected" ||
+        currentWordStatus === "modelled" ||
+        currentWordStatus === "skipped" ||
+        currentWordStatus === "error"
+      ) {
         advanceTo(idx + 1);
+        return;
+      }
+
+      if (!isInitializedRef.current) {
         return;
       }
 
       const silence = Date.now() - lastActivityRef.current;
 
-      if (promptedAtRef.current === null && silence >= strategy.promptDelayMs) {
+      if (promptedAtRef.current === null && silence >= currentStrategy.promptDelayMs) {
         promptedAtRef.current = Date.now();
         markWordStatus(idx, "prompted");
         setLiveHint(phonicsHint(REFERENCE_WORDS[idx]));
         logDecision({
           word: REFERENCE_WORDS[idx],
           action: "PROMPT",
-          reason: `${(strategy.promptDelayMs / 1000).toFixed(0)}s stall`,
+          reason: `${(currentStrategy.promptDelayMs / 1000).toFixed(1)}s stall`,
         });
         return;
       }
 
       if (promptedAtRef.current !== null) {
-        const modelReferenceTime = Math.max(
-          promptedAtRef.current,
-          lastActivityRef.current
-        );
+        const modelReferenceTime = Math.max(promptedAtRef.current, lastActivityRef.current);
 
         if (
-          Date.now() - modelReferenceTime >= strategy.modelDelayMs &&
+          Date.now() - modelReferenceTime >= currentStrategy.modelDelayMs &&
           modelledForIndexRef.current !== idx
         ) {
           modelledForIndexRef.current = idx;
-
           const word = REFERENCE_WORDS[idx];
+
           markWordStatus(idx, "modelled");
           logDecision({
             word,
@@ -513,13 +416,245 @@ export default function Home() {
     }, CHECK_INTERVAL_MS);
 
     return () => {
+      clearTimeout(initializationTimer);
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [isRecording, strategy]);
+  }, [isRecording, advanceTo, markWordStatus, logDecision, speakWord, readingMode]);
 
-  // --------------------------------------------------------------------
-  // START / STOP
-  // --------------------------------------------------------------------
+  // ===== ОБРОБКА РОЗПІЗНАНИХ СЛІВ =====
+  const processRecognizedWords = useCallback((azureWords: AzureWordResult[]) => {
+    if (processingLockRef.current || isStoppingRef.current) return;
+    processingLockRef.current = true;
+
+    try {
+      touchActivity();
+
+      const startIdx = currentIndexRef.current;
+      if (startIdx >= REFERENCE_WORDS.length) {
+        processingLockRef.current = false;
+        return;
+      }
+
+      const filteredAzureWords = azureWords.filter(w => {
+        const accuracy = w.PronunciationAssessment?.AccuracyScore ?? 0;
+        return accuracy >= 20;
+      });
+
+      if (filteredAzureWords.length === 0) {
+        processingLockRef.current = false;
+        return;
+      }
+
+      // ===== ШВИДКИЙ РЕЖИМ: обробляємо всі слова в пакеті =====
+      if (readingMode === "fast") {
+        console.log('🚀 Fast Mode: processing all words:', filteredAzureWords.map(w => w.Word));
+        
+        let processedCount = 0;
+        let currentIdx = startIdx;
+
+        for (const azureWord of filteredAzureWords) {
+          if (currentIdx >= REFERENCE_WORDS.length) break;
+          
+          const expectedWord = REFERENCE_WORDS[currentIdx].toLowerCase();
+          const spokenWord = azureWord.Word.toLowerCase();
+          const accuracy = azureWord.PronunciationAssessment?.AccuracyScore ?? 0;
+          
+          console.log(`Expected: "${expectedWord}", Spoken: "${spokenWord}", Accuracy: ${accuracy}`);
+          
+          // Перевіряємо матч
+          if (spokenWord === expectedWord && accuracy > 50) {
+            markWordStatus(currentIdx, "correct", accuracy);
+            logDecision({
+              word: expectedWord,
+              action: "STAY_SILENT",
+              reason: `accepted: "${azureWord.Word}" (${Math.round(accuracy)}%)`,
+              accuracy: accuracy,
+            });
+            currentIdx++;
+            processedCount++;
+          } else if (accuracy > 60 && spokenWord.startsWith(expectedWord[0])) {
+            markWordStatus(currentIdx, "correct", accuracy);
+            logDecision({
+              word: expectedWord,
+              action: "STAY_SILENT",
+              reason: `accepted: "${azureWord.Word}" (${Math.round(accuracy)}%)`,
+              accuracy: accuracy,
+            });
+            currentIdx++;
+            processedCount++;
+          } else {
+            // Якщо не матч - позначаємо як помилку
+            markWordStatus(currentIdx, "error", accuracy);
+            logDecision({
+              word: expectedWord,
+              action: "ERROR",
+              reason: `heard "${azureWord.Word}" instead (${Math.round(accuracy)}%)`,
+              accuracy: accuracy,
+            });
+            currentIdx++;
+            processedCount++;
+          }
+        }
+
+        // Якщо обробили хоч одне слово - переходимо на нову позицію
+        if (processedCount > 0) {
+          advanceTo(currentIdx);
+        }
+        
+        processingLockRef.current = false;
+        return;
+      }
+
+      // ===== ПОВІЛЬНИЙ РЕЖИМ: поточний (одне слово за раз) =====
+      console.log('🐢 Slow Mode: processing one word at a time');
+      
+      const expectedWord = REFERENCE_WORDS[startIdx].toLowerCase();
+      let foundMatch = false;
+      let bestMatch = null;
+      let bestAccuracy = 0;
+
+      for (const azureWord of filteredAzureWords) {
+        const spokenWord = azureWord.Word.toLowerCase();
+        const accuracy = azureWord.PronunciationAssessment?.AccuracyScore ?? 0;
+        
+        console.log(`Expected: "${expectedWord}", Spoken: "${spokenWord}", Accuracy: ${accuracy}`);
+        
+        if (spokenWord === expectedWord && accuracy > 50) {
+          bestMatch = azureWord;
+          bestAccuracy = accuracy;
+          foundMatch = true;
+          break;
+        }
+        
+        if (accuracy > 60 && spokenWord.startsWith(expectedWord[0])) {
+          if (accuracy > bestAccuracy) {
+            bestMatch = azureWord;
+            bestAccuracy = accuracy;
+            foundMatch = true;
+          }
+        }
+      }
+
+      if (foundMatch && bestMatch) {
+        const wasPrompted = promptedAtRef.current !== null;
+        const status: WordStatus = wasPrompted ? "self-corrected" : "correct";
+        
+        markWordStatus(startIdx, status, bestAccuracy);
+        setCurrentSpokenWord(bestMatch.Word);
+        
+        logDecision({
+          word: expectedWord,
+          action: "STAY_SILENT",
+          reason: wasPrompted ? "self-corrected after prompt" : `accepted: "${bestMatch.Word}" (${Math.round(bestAccuracy)}%)`,
+          accuracy: bestAccuracy,
+        });
+        
+        advanceTo(startIdx + 1);
+      } else if (filteredAzureWords.length > 0) {
+        const firstWord = filteredAzureWords[0];
+        const firstWordText = firstWord.Word;
+        const firstWordAccuracy = firstWord.PronunciationAssessment?.AccuracyScore ?? 0;
+        
+        if (firstWordAccuracy < 30) {
+          markWordStatus(startIdx, "error", firstWordAccuracy);
+          setCurrentSpokenWord(firstWordText);
+          
+          logDecision({
+            word: expectedWord,
+            action: "ERROR",
+            reason: `poor pronunciation: "${firstWordText}" (${Math.round(firstWordAccuracy)}%)`,
+            accuracy: firstWordAccuracy,
+          });
+          
+          advanceTo(startIdx + 1);
+        }
+      }
+
+    } catch (err) {
+      console.error("Error processing words:", err);
+    } finally {
+      processingLockRef.current = false;
+    }
+  }, [touchActivity, markWordStatus, logDecision, advanceTo, readingMode]);
+
+  // ===== ЗБЕРЕЖЕННЯ АУДІО В STORAGE =====
+  const saveAudioToStorage = useCallback(async (sessionId: number, audioBlob: Blob) => {
+    try {
+      const formData = new FormData();
+      formData.append('file', audioBlob, `session_${sessionId}.webm`);
+      
+      const response = await fetch(`http://localhost:8000/api/sessions/${sessionId}/audio`, {
+        method: 'POST',
+        body: formData,
+      });
+      
+      if (!response.ok) throw new Error('Failed to upload audio');
+      const data = await response.json();
+      console.log('✅ Audio uploaded:', data.audio_url);
+      return data.audio_url;
+    } catch (error) {
+      console.error('❌ Failed to upload audio:', error);
+      return null;
+    }
+  }, []);
+
+  // ===== ФУНКЦІЯ ЗБЕРЕЖЕННЯ СЕСІЇ (оновлена з аудіо) =====
+  const saveSessionToApi = useCallback(async () => {
+    try {
+      const totalWords = REFERENCE_WORDS.length;
+      const correctWords = wordsRef.current.filter(
+        w => w.status === 'correct' || w.status === 'self-corrected'
+      ).length;
+      
+      if (correctWords === 0) {
+        console.log('⚠️ No correct words, skipping save');
+        return;
+      }
+      
+      const accuracy = totalWords > 0 ? Math.round((correctWords / totalWords) * 100) : 0;
+      
+      const durationMinutes = (Date.now() - startTimeRef.current) / 60000;
+      const wpm = durationMinutes > 0 ? Math.round(totalWords / durationMinutes) : 0;
+      
+      const uniqueErrors = errorWordsRef.current.filter((word, index) => 
+        errorWordsRef.current.indexOf(word) === index
+      );
+      
+      const errors = uniqueErrors.map(word => ({
+        word: word,
+        type: 'substitution',
+        expected: word,
+        actual: 'unknown',
+        confidence: 0.5
+      }));
+      
+      const sessionData = {
+        student_id: 1,
+        story_id: 1,
+        wpm: wpm,
+        accuracy: accuracy,
+        total_words: totalWords,
+        correct_words: correctWords,
+        errors: errors
+      };
+      
+      console.log('📤 Sending session data:', sessionData);
+      const result = await createSession(sessionData);
+      console.log('✅ Session saved:', result);
+      
+      // ===== ЗБЕРІГАЄМО АУДІО =====
+      // Отримуємо аудіо-блоб з useHesitationFSM
+      if (getAudioBlob) {
+        const audioBlob = getAudioBlob();
+        if (audioBlob) {
+          await saveAudioToStorage(result.id, audioBlob);
+        }
+      }
+      
+    } catch (error) {
+      console.error('❌ Failed to save session:', error);
+    }
+  }, [getAudioBlob, saveAudioToStorage]);
 
   const startRecording = async () => {
     try {
@@ -527,20 +662,29 @@ export default function Home() {
       setDecisionTrace([]);
       errorWordsRef.current = [];
       setShowErrorSummary(false);
-      
+      setCurrentSpokenWord("");
+      isStoppingRef.current = false;
+
       currentIndexRef.current = 0;
       promptedAtRef.current = null;
       modelledForIndexRef.current = null;
       processingLockRef.current = false;
       lastActivityRef.current = Date.now();
-      commitWords(initialWords());
+      startTimeRef.current = Date.now();
+      isInitializedRef.current = false;
+      lastSpokenWordRef.current = "";
+
+      const freshWords = initialWords();
+      commitWords(freshWords);
       setLiveHint("");
+
+      await startVAD();
 
       const response = await fetch("/api/azure-speech-token", { method: "POST" });
       const data = await response.json();
 
       if (!response.ok || !data.token || !data.region) {
-        throw new Error(`Could not get Azure Speech token. HTTP ${response.status}`);
+        throw new Error(`Failed to retrieve Azure Speech token (HTTP ${response.status})`);
       }
 
       const speechConfig = SpeechSDK.SpeechConfig.fromAuthorizationToken(
@@ -568,34 +712,30 @@ export default function Home() {
 
       recognizer.recognizing = (_sender, event) => {
         touchActivity();
+        if (event.result.text) {
+          setCurrentSpokenWord(event.result.text);
+        }
       };
 
       recognizer.recognized = (_sender, event) => {
-        if (event.result.reason !== SpeechSDK.ResultReason.RecognizedSpeech) {
-          touchActivity();
-          return;
-        }
+        touchActivity();
+        if (event.result.reason !== SpeechSDK.ResultReason.RecognizedSpeech) return;
 
         const json = event.result.properties.getProperty(
           SpeechSDK.PropertyId.SpeechServiceResponse_JsonResult
         );
 
-        let parsed: any = null;
+        let parsed: { NBest?: { Words?: AzureWordResult[] }[] } | null = null;
         try {
           parsed = JSON.parse(json);
         } catch {
-          // ignore
+          // JSON parse error
         }
 
         const azureWords = parsed?.NBest?.[0]?.Words ?? [];
-
-        const simplified = azureWords.map((w: any) => ({
-          Word: w.Word ?? "",
-          AccuracyScore: w.PronunciationAssessment?.AccuracyScore ?? 0,
-        }));
-
-        if (simplified.length > 0) {
-          processRecognizedWords(simplified, false);
+        if (azureWords.length > 0) {
+          console.log('🎤 Recognized words:', azureWords.map(w => ({ word: w.Word, accuracy: w.PronunciationAssessment?.AccuracyScore })));
+          processRecognizedWords(azureWords);
         }
       };
 
@@ -608,6 +748,7 @@ export default function Home() {
         touchActivity();
         setIsRecording(true);
       };
+
       recognizer.sessionStopped = () => {
         setIsRecording(false);
         if (errorWordsRef.current.length > 0) {
@@ -632,34 +773,10 @@ export default function Home() {
   };
 
   const stopRecording = () => {
-    const recognizer = recognizerRef.current;
-    if (!recognizer) return;
-
-    recognizer.stopContinuousRecognitionAsync(
-      () => {
-        recognizer.close();
-        recognizerRef.current = null;
-        setIsRecording(false);
-        if (errorWordsRef.current.length > 0) {
-          setShowErrorSummary(true);
-        }
-      },
-      () => {
-        recognizer.close();
-        recognizerRef.current = null;
-        setIsRecording(false);
-        if (errorWordsRef.current.length > 0) {
-          setShowErrorSummary(true);
-        }
-      }
-    );
+    performStop();
   };
 
   const finished = currentIndexRef.current >= REFERENCE_WORDS.length;
-
-  // --------------------------------------------------------------------
-  // UI
-  // --------------------------------------------------------------------
 
   if (studentLoading) {
     return (
@@ -677,56 +794,73 @@ export default function Home() {
           <p className="mt-2 text-sm text-gray-500">
             {student ? `${student.name} • ${student.age} years old` : "Read aloud together"}
           </p>
-          {strategy && (
-            <div className="mt-2 text-xs text-gray-400">
-              Level:{" "}
-              <span
-                className={
-                  student?.readingLevel === "beginner"
-                    ? "text-orange-500"
-                    : student?.readingLevel === "intermediate"
-                    ? "text-blue-500"
-                    : "text-green-500"
-                }
-              >
-                {student?.readingLevel === "beginner"
-                  ? "📖 Beginner (check all words)"
-                  : student?.readingLevel === "intermediate"
-                  ? "📚 Intermediate (check ~70%)"
-                  : "🚀 Advanced (check ~50%)"}
-              </span>
-            </div>
-          )}
         </div>
 
-        {/* CHILD VIEW */}
         <section className="rounded-3xl bg-white p-8 shadow-sm">
           <p className="mb-6 text-sm text-gray-500">Read this:</p>
 
           <p className="flex flex-wrap gap-x-3 gap-y-2 text-3xl font-medium leading-relaxed">
-            {words.map((w, i) => (
-              <span
-                key={i}
-                className={
-                  w.status === "current"
-                    ? "rounded bg-yellow-100 px-1 text-gray-900"
-                    : w.status === "prompted"
-                    ? "rounded bg-orange-100 px-1 text-gray-900"
-                    : w.status === "modelled"
-                    ? "rounded bg-blue-100 px-1 text-gray-900"
-                    : w.status === "skipped"
-                    ? "text-gray-300 line-through"
-                    : w.status === "error"
-                    ? "rounded bg-red-200 px-1 text-gray-900"
-                    : w.status === "correct" || w.status === "self-corrected"
-                    ? "text-gray-400"
-                    : "text-gray-900"
-                }
-              >
-                {w.word}
-              </span>
-            ))}
+            {words.map((w, i) => {
+              let styleClass = "text-gray-900";
+
+              if (w.status === "current") {
+                styleClass = "rounded bg-yellow-300 px-2 py-0.5 text-black font-bold shadow-sm scale-105 inline-block";
+              } else if (w.status === "prompted") {
+                styleClass = "rounded bg-orange-300 px-2 py-0.5 text-black font-bold";
+              } else if (w.status === "modelled") {
+                styleClass = "rounded bg-blue-300 px-2 py-0.5 text-black font-bold";
+              } else if (w.status === "skipped") {
+                styleClass = "text-gray-300 line-through";
+              } else if (w.status === "error") {
+                styleClass = "rounded bg-red-300 px-2 py-0.5 text-red-900 font-bold";
+              } else if (w.status === "correct" || w.status === "self-corrected") {
+                styleClass = "text-green-600 font-normal";
+              }
+
+              return (
+                <span key={i} className={`transition-all duration-150 ${styleClass}`}>
+                  {w.word}
+                </span>
+              );
+            })}
           </p>
+
+          {/* ===== ПЕРЕМИКАЧ РЕЖИМІВ ===== */}
+          <div className="mt-4 flex justify-center gap-3">
+            <button
+              onClick={() => setReadingMode("slow")}
+              className={`px-5 py-2 rounded-full text-sm font-semibold transition-all ${
+                readingMode === "slow"
+                  ? "bg-orange-500 text-white shadow-md"
+                  : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+              }`}
+              disabled={isRecording}
+            >
+              🐢 Slow Mode
+            </button>
+            <button
+              onClick={() => setReadingMode("fast")}
+              className={`px-5 py-2 rounded-full text-sm font-semibold transition-all ${
+                readingMode === "fast"
+                  ? "bg-blue-500 text-white shadow-md"
+                  : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+              }`}
+              disabled={isRecording}
+            >
+              🚀 Fast Mode
+            </button>
+          </div>
+          <p className="mt-1 text-center text-xs text-gray-400">
+            {readingMode === "slow" 
+              ? "🐢 One word at a time with prompts" 
+              : "🚀 All words at once, no prompts"}
+          </p>
+
+          {isRecording && currentSpokenWord && (
+            <p className="mt-3 text-sm text-gray-500">
+              🎤 Recognized: <span className="font-medium text-blue-600">{currentSpokenWord}</span>
+            </p>
+          )}
 
           {liveHint && <p className="mt-4 text-lg text-orange-600">Try: {liveHint}</p>}
 
@@ -750,11 +884,7 @@ export default function Home() {
 
           {isRecording && !finished && (
             <p className="mt-5 text-center text-sm text-gray-500">
-              Listening
-              {strategy && strategy.checkRate < 1
-                ? ` (checking ~${Math.round(strategy.checkRate * 100)}% of words)`
-                : " (checking all words)"}
-              ...
+              {currentSpokenWord ? '🎤 Analyzing...' : '🎤 Listening... Speak clearly!'}
             </p>
           )}
 
@@ -763,36 +893,6 @@ export default function Home() {
           )}
         </section>
 
-        {/* ERROR SUMMARY */}
-        {showErrorSummary && errorWordsRef.current.length > 0 && (
-          <section className="mt-6 rounded-2xl bg-red-50 p-6">
-            <h3 className="text-lg font-semibold text-red-700">📝 Words to practice</h3>
-            <p className="mt-1 text-sm text-red-600">
-              Here are the words you missed. Try reading them again:
-            </p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {errorWordsRef.current.map((word, i) => (
-                <span
-                  key={i}
-                  className="rounded-full bg-red-100 px-4 py-2 text-lg font-medium text-red-700 cursor-pointer hover:bg-red-200"
-                  onClick={() => speakWord(word)}
-                >
-                  {word} 🔊
-                </span>
-              ))}
-            </div>
-            <p className="mt-3 text-xs text-red-500">Click a word to hear it.</p>
-          </section>
-        )}
-
-        {error && (
-          <section className="mt-6 rounded-2xl bg-red-50 p-5">
-            <p className="font-medium text-red-700">Error</p>
-            <p className="mt-2 text-sm text-red-600">{error}</p>
-          </section>
-        )}
-
-        {/* TEACHER VIEW */}
         <section className="mt-6">
           <button
             onClick={() => setShowTeacherView((v) => !v)}
