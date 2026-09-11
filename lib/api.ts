@@ -49,6 +49,7 @@ export interface StudentAnalytics {
   frequent_errors: FrequentError[];
   difficult_words: { word: string; count: number }[];
   last_session_date: string | null;
+  last_session_audio_url?: string | null;
 }
 
 export interface Recommendations {

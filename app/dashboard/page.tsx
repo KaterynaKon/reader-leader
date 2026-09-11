@@ -34,7 +34,8 @@ export default function DashboardPage() {
 
   // Завантаження аналітики при виборі студента
   useEffect(() => {
-    if (!selectedStudent) return;
+    const studentId = selectedStudent?.id;
+    if (studentId === undefined) return;
 
     async function loadAnalytics() {
       try {
@@ -42,8 +43,8 @@ export default function DashboardPage() {
         setAudioLoading(true);
         
         const [analyticsData, recData] = await Promise.all([
-          getStudentAnalytics(selectedStudent.id),
-          getStudentRecommendations(selectedStudent.id),
+          getStudentAnalytics(studentId!),
+          getStudentRecommendations(studentId!),
         ]);
         setAnalytics(analyticsData);
         setRecommendations(recData);
@@ -63,50 +64,51 @@ export default function DashboardPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p className="text-gray-500">Loading dashboard...</p>
+      <div className="rl-loading-page">
+        <p>Loading dashboard...</p>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p className="text-red-500">{error}</p>
+      <div className="rl-error-page">
+        <p>{error}</p>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 p-8">
-      <div className="max-w-6xl mx-auto">
-        <h1 className="text-3xl font-bold text-gray-900 mb-2">📚 Reading Analytics</h1>
-        <p className="text-gray-500 mb-8">Teacher Dashboard — select a student to view details</p>
+    <div className="rl-dashboard">
+      <div className="rl-dashboard-wrap">
+        <p className="rl-dashboard-kicker">Reader Leader · teacher space</p>
+        <h1 className="rl-dashboard-title">Reading Analytics</h1>
+        <p className="rl-dashboard-subtitle">Teacher Dashboard — select a student to view details</p>
 
         {/* Список студентів */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+        <div className="rl-student-grid">
           {students.map((student) => (
             <div
               key={student.id}
               onClick={() => setSelectedStudent(student)}
-              className={`bg-white rounded-xl p-5 shadow-sm cursor-pointer transition-all hover:shadow-md border-2 ${
-                selectedStudent?.id === student.id ? 'border-blue-500 bg-blue-50' : 'border-transparent'
+              className={`rl-student-card ${
+                selectedStudent?.id === student.id ? 'is-selected' : ''
               }`}
             >
-              <div className="font-semibold text-lg">{student.name}</div>
-              <div className="text-sm text-gray-500">
+              <div className="rl-student-name">{student.name}</div>
+              <div className="rl-student-date">
                 {student.last_session_date
                   ? new Date(student.last_session_date).toLocaleDateString()
                   : 'No sessions'}
               </div>
-              <div className="mt-2">
+              <div className="rl-student-status-row">
                 <span
-                  className={`inline-block px-3 py-1 rounded-full text-sm font-medium ${
+                  className={`rl-status-pill ${
                     student.needs_attention
-                      ? 'bg-red-100 text-red-700'
+                      ? 'rl-status-pill--attention'
                       : student.wpm
-                      ? 'bg-green-100 text-green-700'
-                      : 'bg-gray-100 text-gray-500'
+                      ? 'rl-status-pill--active'
+                      : 'rl-status-pill--empty'
                   }`}
                 >
                   {student.needs_attention
@@ -115,7 +117,7 @@ export default function DashboardPage() {
                     ? `✅ ${student.wpm} WPM`
                     : 'No sessions'}
                 </span>
-                <span className="ml-2 text-gray-400">
+                <span className="rl-progress-arrow">
                   {student.progress === '↑' ? '📈' : student.progress === '↓' ? '📉' : '➖'}
                 </span>
               </div>
@@ -125,92 +127,92 @@ export default function DashboardPage() {
 
         {/* Аналітика */}
         {analytics && selectedStudent && (
-          <div className="bg-white rounded-2xl p-6 shadow-sm">
-            <div className="flex justify-between items-center mb-6">
-              <h2 className="text-2xl font-semibold">{analytics.student_name}</h2>
-              <span className="text-sm text-gray-500">
+          <div className="rl-analytics-card">
+            <div className="rl-analytics-head">
+              <h2 className="rl-analytics-title">{analytics.student_name}</h2>
+              <p className="rl-analytics-date">
                 {analytics.last_session_date
                   ? `Last session: ${new Date(analytics.last_session_date).toLocaleDateString()}`
                   : 'No sessions'}
-              </span>
+              </p>
             </div>
 
             {/* Статистика */}
-            <div className="grid grid-cols-3 gap-4 mb-6">
-              <div className="bg-gray-50 rounded-xl p-4 text-center">
-                <div className="text-3xl font-bold text-gray-900">{analytics.progress.average_wpm}</div>
-                <div className="text-sm text-gray-500">Avg WPM</div>
-                <div className={`text-sm font-medium ${analytics.progress.wpm_trend > 0 ? 'text-green-600' : 'text-red-600'}`}>
+            <div className="rl-stat-grid">
+              <div className="rl-stat-card">
+                <div className="rl-stat-value">{analytics.progress.average_wpm}</div>
+                <div className="rl-stat-label">Avg WPM</div>
+                <div className={`rl-stat-trend ${analytics.progress.wpm_trend > 0 ? 'rl-trend-positive' : 'rl-trend-negative'}`}>
                   {analytics.progress.wpm_trend > 0 ? `↑ +${analytics.progress.wpm_trend}%` : '➖ 0%'}
                 </div>
               </div>
-              <div className="bg-gray-50 rounded-xl p-4 text-center">
-                <div className="text-3xl font-bold text-gray-900">{analytics.progress.average_accuracy}%</div>
-                <div className="text-sm text-gray-500">Accuracy</div>
-                <div className={`text-sm font-medium ${analytics.progress.accuracy_trend > 0 ? 'text-green-600' : 'text-red-600'}`}>
+              <div className="rl-stat-card">
+                <div className="rl-stat-value">{analytics.progress.average_accuracy}%</div>
+                <div className="rl-stat-label">Accuracy</div>
+                <div className={`rl-stat-trend ${analytics.progress.accuracy_trend > 0 ? 'rl-trend-positive' : 'rl-trend-negative'}`}>
                   {analytics.progress.accuracy_trend > 0 ? `↑ +${analytics.progress.accuracy_trend}%` : '➖ 0%'}
                 </div>
               </div>
-              <div className="bg-gray-50 rounded-xl p-4 text-center">
-                <div className="text-3xl font-bold text-gray-900">{analytics.progress.total_sessions}</div>
-                <div className="text-sm text-gray-500">Total Sessions</div>
+              <div className="rl-stat-card">
+                <div className="rl-stat-value">{analytics.progress.total_sessions}</div>
+                <div className="rl-stat-label">Total Sessions</div>
               </div>
             </div>
 
             {/* ===== АУДІО-ПЛЕЄР (НОВИЙ БЛОК) ===== */}
             {audioLoading ? (
-              <div className="mb-6 p-4 bg-gray-50 rounded-xl text-center text-gray-500 text-sm">
+              <div className="rl-empty-audio">
                 Loading audio...
               </div>
             ) : audioUrl ? (
-              <div className="mb-6 p-4 bg-gray-50 rounded-xl border border-gray-200">
-                <p className="text-sm font-medium text-gray-700 mb-2 flex items-center gap-2">
+              <div className="rl-audio-panel">
+                <p className="rl-audio-title">
                   🎧 Recording
-                  <span className="text-xs text-gray-400 font-normal">(last session)</span>
+                  <small> (last session)</small>
                 </p>
-                <audio controls className="w-full max-w-md">
+                <audio controls className="rl-audio-player">
                   <source src={audioUrl} type="audio/webm" />
                   <source src={audioUrl} type="audio/mp3" />
                   <source src={audioUrl} type="audio/wav" />
                   Your browser does not support the audio element.
                 </audio>
-                <p className="text-xs text-gray-400 mt-1 truncate">{audioUrl}</p>
+                <p className="rl-audio-url">{audioUrl}</p>
               </div>
             ) : (
-              <div className="mb-6 p-4 bg-gray-50 rounded-xl text-center text-gray-400 text-sm border border-dashed border-gray-300">
+              <div className="rl-empty-audio">
                 🎙️ No recording available for this student
               </div>
             )}
 
             {/* Помилки та складні слова */}
-            <div className="grid grid-cols-2 gap-6 mb-6">
+            <div className="rl-details-grid">
               <div>
-                <h3 className="font-semibold text-gray-700 mb-3">⚠️ Frequent Errors</h3>
-                <ul className="space-y-2">
+                <h3 className="rl-details-title">⚠️ Frequent Errors</h3>
+                <ul className="rl-details-list">
                   {analytics.frequent_errors.length > 0 ? (
                     analytics.frequent_errors.map((e) => (
-                      <li key={e.error_type} className="flex justify-between bg-gray-50 px-4 py-2 rounded-lg">
+                      <li key={e.error_type}>
                         <span>{e.error_type}</span>
-                        <span className="bg-gray-200 px-3 py-0.5 rounded-full text-sm font-medium">{e.count}</span>
+                        <span className="rl-count-pill">{e.count}</span>
                       </li>
                     ))
                   ) : (
-                    <li className="text-gray-400">No errors 🎉</li>
+                    <li className="rl-details-empty">No errors 🎉</li>
                   )}
                 </ul>
               </div>
               <div>
-                <h3 className="font-semibold text-gray-700 mb-3">🔤 Difficult Words</h3>
-                <ul className="space-y-2">
+                <h3 className="rl-details-title">🔤 Difficult Words</h3>
+                <ul className="rl-details-list">
                   {analytics.difficult_words.length > 0 ? (
                     analytics.difficult_words.map((w) => (
-                      <li key={w.word} className="flex justify-between bg-gray-50 px-4 py-2 rounded-lg">
+                      <li key={w.word}>
                         <span>{w.word}</span>
-                        <span className="bg-gray-200 px-3 py-0.5 rounded-full text-sm font-medium">{w.count}</span>
+                        <span className="rl-count-pill">{w.count}</span>
                       </li>
                     ))
                   ) : (
-                    <li className="text-gray-400">No difficult words 🎉</li>
+                    <li className="rl-details-empty">No difficult words 🎉</li>
                   )}
                 </ul>
               </div>
@@ -218,24 +220,24 @@ export default function DashboardPage() {
 
             {/* Рекомендації */}
             {recommendations && (
-              <div className="bg-blue-50 rounded-xl p-5 border-l-4 border-blue-500">
-                <h3 className="font-semibold text-gray-700 mb-3">💡 Teacher Recommendations</h3>
-                <ul className="space-y-1 mb-4">
+              <div className="rl-recommendations">
+                <h3 className="rl-recommendations-title">💡 Teacher Recommendations</h3>
+                <ul className="rl-recommendations-list">
                   {recommendations.recommendations.map((r, i) => (
-                    <li key={i} className="text-gray-700">• {r}</li>
+                    <li key={i}>• {r}</li>
                   ))}
                 </ul>
-                <div>
+                <div className="rl-practice-label">
                   <strong>Practice Words:</strong>
-                  <div className="flex flex-wrap gap-2 mt-2">
+                  <div className="rl-word-pills">
                     {recommendations.practice_words.map((w) => (
-                      <span key={w} className="bg-blue-200 px-4 py-1 rounded-full text-sm font-medium text-blue-800">
+                      <span key={w} className="rl-word-pill">
                         {w}
                       </span>
                     ))}
                   </div>
                 </div>
-                <div className="mt-3 text-sm text-gray-600">
+                <div className="rl-next-difficulty">
                   <strong>Next Difficulty:</strong> {recommendations.next_story_difficulty}
                 </div>
               </div>

@@ -780,45 +780,45 @@ export default function Home() {
 
   if (studentLoading) {
     return (
-      <main className="min-h-screen bg-gray-50 px-6 py-12 flex items-center justify-center">
-        <p className="text-gray-500">Loading student profile...</p>
+      <main className="rl-loading-page">
+        <p>Loading student profile...</p>
       </main>
     );
   }
 
   return (
-    <main className="min-h-screen bg-gray-50 px-6 py-12">
-      <div className="mx-auto w-full max-w-3xl">
-        <div className="mb-10 text-center">
-          <h1 className="text-3xl font-semibold text-gray-900">Reader Leader</h1>
-          <p className="mt-2 text-sm text-gray-500">
+    <main className="rl-reader-page">
+      <div className="rl-reader-wrap">
+        <div className="rl-reader-header">
+          <h1 className="rl-brand-lockup"><span className="rl-brand-mark" aria-hidden="true"><span /></span>Reader Leader</h1>
+          <p className="rl-reader-meta">
             {student ? `${student.name} • ${student.age} years old` : "Read aloud together"}
           </p>
         </div>
 
-        <section className="rounded-3xl bg-white p-8 shadow-sm">
-          <p className="mb-6 text-sm text-gray-500">Read this:</p>
+        <section className="rl-session-card">
+          <p className="rl-session-label">Read this</p>
 
-          <p className="flex flex-wrap gap-x-3 gap-y-2 text-3xl font-medium leading-relaxed">
+          <p className="rl-reader-text">
             {words.map((w, i) => {
-              let styleClass = "text-gray-900";
+              let styleClass = "rl-word";
 
               if (w.status === "current") {
-                styleClass = "rounded bg-yellow-300 px-2 py-0.5 text-black font-bold shadow-sm scale-105 inline-block";
+                styleClass = "rl-word rl-word-current";
               } else if (w.status === "prompted") {
-                styleClass = "rounded bg-orange-300 px-2 py-0.5 text-black font-bold";
+                styleClass = "rl-word rl-word-prompted";
               } else if (w.status === "modelled") {
-                styleClass = "rounded bg-blue-300 px-2 py-0.5 text-black font-bold";
+                styleClass = "rl-word rl-word-modelled";
               } else if (w.status === "skipped") {
-                styleClass = "text-gray-300 line-through";
+                styleClass = "rl-word rl-word-skipped";
               } else if (w.status === "error") {
-                styleClass = "rounded bg-red-300 px-2 py-0.5 text-red-900 font-bold";
+                styleClass = "rl-word rl-word-error";
               } else if (w.status === "correct" || w.status === "self-corrected") {
-                styleClass = "text-green-600 font-normal";
+                styleClass = "rl-word rl-word-correct";
               }
 
               return (
-                <span key={i} className={`transition-all duration-150 ${styleClass}`}>
+                <span key={i} className={styleClass}>
                   {w.word}
                 </span>
               );
@@ -826,13 +826,13 @@ export default function Home() {
           </p>
 
           {/* ===== ПЕРЕМИКАЧ РЕЖИМІВ ===== */}
-          <div className="mt-4 flex justify-center gap-3">
+          <div className="rl-mode-panel">
             <button
               onClick={() => setReadingMode("slow")}
-              className={`px-5 py-2 rounded-full text-sm font-semibold transition-all ${
+              className={`rl-mode-button rl-mode-button--slow ${
                 readingMode === "slow"
-                  ? "bg-orange-500 text-white shadow-md"
-                  : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                  ? "is-active"
+                  : ""
               }`}
               disabled={isRecording}
             >
@@ -840,42 +840,42 @@ export default function Home() {
             </button>
             <button
               onClick={() => setReadingMode("fast")}
-              className={`px-5 py-2 rounded-full text-sm font-semibold transition-all ${
+              className={`rl-mode-button rl-mode-button--fast ${
                 readingMode === "fast"
-                  ? "bg-blue-500 text-white shadow-md"
-                  : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                  ? "is-active"
+                  : ""
               }`}
               disabled={isRecording}
             >
               🚀 Fast Mode
             </button>
           </div>
-          <p className="mt-1 text-center text-xs text-gray-400">
+          <p className="rl-mode-copy">
             {readingMode === "slow" 
               ? "🐢 One word at a time with prompts" 
               : "🚀 All words at once, no prompts"}
           </p>
 
           {isRecording && currentSpokenWord && (
-            <p className="mt-3 text-sm text-gray-500">
-              🎤 Recognized: <span className="font-medium text-blue-600">{currentSpokenWord}</span>
+            <p className="rl-recognition">
+              🎤 Recognized: <strong>{currentSpokenWord}</strong>
             </p>
           )}
 
-          {liveHint && <p className="mt-4 text-lg text-orange-600">Try: {liveHint}</p>}
+          {liveHint && <p className="rl-hint">Try: {liveHint}</p>}
 
-          <div className="mt-8 text-center">
+          <div className="rl-action-row">
             {!isRecording ? (
               <button
                 onClick={startRecording}
-                className="rounded-full bg-gray-900 px-8 py-4 text-lg font-medium text-white transition hover:bg-gray-800"
+                className="rl-record-button"
               >
                 🎤 Start Reading
               </button>
             ) : (
               <button
                 onClick={stopRecording}
-                className="rounded-full bg-red-600 px-8 py-4 text-lg font-medium text-white transition hover:bg-red-700"
+                className="rl-record-button rl-record-button--stop"
               >
                 ■ Stop
               </button>
@@ -883,57 +883,57 @@ export default function Home() {
           </div>
 
           {isRecording && !finished && (
-            <p className="mt-5 text-center text-sm text-gray-500">
+            <p className="rl-listening">
               {currentSpokenWord ? '🎤 Analyzing...' : '🎤 Listening... Speak clearly!'}
             </p>
           )}
 
           {finished && (
-            <p className="mt-5 text-center text-sm text-green-600">Finished reading 🎉</p>
+            <p className="rl-finished">Finished reading 🎉</p>
           )}
         </section>
 
-        <section className="mt-6">
+        <section className="rl-teacher-section">
           <button
             onClick={() => setShowTeacherView((v) => !v)}
-            className="text-sm text-gray-500 underline"
+            className="rl-teacher-toggle"
           >
             {showTeacherView ? "Hide" : "Show"} decision trace (teacher view)
           </button>
 
           {showTeacherView && (
-            <div className="mt-4 rounded-2xl bg-white p-6 shadow-sm">
-              <p className="mb-4 text-sm font-medium text-gray-700">Live decision trace</p>
+            <div className="rl-teacher-card">
+              <p className="rl-teacher-title">Live decision trace</p>
 
               {decisionTrace.length === 0 ? (
-                <p className="text-sm text-gray-400">No decisions yet.</p>
+                <p className="rl-empty-trace">No decisions yet.</p>
               ) : (
-                <div className="max-h-96 space-y-2 overflow-y-auto">
+                <div className="rl-trace-list">
                   {decisionTrace.map((d, i) => (
                     <div
                       key={i}
-                      className="flex items-center justify-between border-b border-gray-100 pb-2 text-sm"
+                      className="rl-trace-row"
                     >
-                      <span className="font-medium text-gray-900">{d.word}</span>
+                      <span className="rl-trace-word">{d.word}</span>
                       <span
                         className={
                           d.action === "STAY_SILENT"
-                            ? "text-green-600"
+                            ? "rl-trace-action rl-action-success"
                             : d.action === "WAIT"
-                            ? "text-gray-400"
+                            ? "rl-trace-action rl-action-wait"
                             : d.action === "PROMPT"
-                            ? "text-orange-600"
+                            ? "rl-trace-action rl-action-prompt"
                             : d.action === "MODEL"
-                            ? "text-blue-600"
+                            ? "rl-trace-action rl-action-model"
                             : d.action === "ERROR"
-                            ? "text-red-600"
-                            : "text-gray-400"
+                            ? "rl-trace-action rl-action-error"
+                            : "rl-trace-action rl-action-wait"
                         }
                       >
                         {d.action}
                       </span>
-                      <span className="text-gray-500">{d.reason}</span>
-                      <span className="text-gray-400">
+                      <span className="rl-trace-reason">{d.reason}</span>
+                      <span className="rl-trace-score">
                         {d.accuracy !== undefined ? d.accuracy.toFixed(0) : ""}
                       </span>
                     </div>
